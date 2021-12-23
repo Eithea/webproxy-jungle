@@ -8,7 +8,7 @@
 void doit(int fd);
 int parse_uri(char *uri, char *hostname, char *path, int *port);
 void makeHTTPheader(char *http_header, char *hostname, char *path, int port, rio_t *client_rio);
-void *thread_routine(void *vargp);
+void *thread_routine(void *connfdp);
 
 int main(int argc, char **argv)
 {
@@ -26,25 +26,36 @@ int main(int argc, char **argv)
     listenfd = Open_listenfd(argv[1]);
     while (1)
     {
+        // sever main에서 일련의 처리를 하는 대신 스레드를 분기
+        // 각 연결에 대해 이후의 과정은 스레드 내에서 병렬적으로 처리되며
+        // main은 다시 while문의 처음으로 돌아가 새로운 연결을 기다린다
         clientlen = sizeof(clientaddr);
+        // 이때 각 스레드는 모두 각각의 connfd를 가져야 하기 때문에, 연결마다 메모리를 할당하여 포인팅한다
         int *connfdp = Malloc(sizeof(int));
         *connfdp = Accept(listenfd, (SA *)&clientaddr, &clientlen);
         Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
         printf("Accepted connection from (%s, %s)\n", hostname, port);
+        // thread_routine를 실행하는 thread 생성
+        // 연결마다 고유한 connfdp를 thread_routine의 입력으로 가져간다
         Pthread_create(&tid, NULL, thread_routine, connfdp);
     }
     return 0;
 }
 
-void *thread_routine(void *vargp)
+void *thread_routine(void *connfdp)
 {
-    int connfd = *((int *)vargp);
+    // 각 스레드별 connfd는 입력으로 가져온 connfdp가 가리키던 할당된 위치의 fd값
+    int connfd = *((int *)connfdp);
+    // 스레드 종료시 자원을 반납하고
     Pthread_detach(pthread_self());
-    Free(vargp);
+    // connfdp도 이미 connfd를 얻어 역할을 다했으니 반납한다
+    Free(connfdp);
     doit(connfd);
     Close(connfd);
     return NULL;
 }
+
+// 이후 각 스레드의 수행은 seqential과 같으니 생략
 
 void doit(int fd)
 {

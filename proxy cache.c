@@ -2,7 +2,7 @@
 #include "csapp.h"
 
 void cache_init();
-void *thread_routine(void *fdP);
+void *thread_routine(void *connfdp);
 void doit(int connfd);
 int parse_uri(char *uri, char *hostname, char *path, int *port);
 void makeHTTPheader(char *HTTPheader, char *hostname, char *path, int port, rio_t *client_rio);
@@ -43,14 +43,14 @@ int main(int argc, char **argv)
     return 0;
 }
 
-void *thread_routine(void *fdP)
+void *thread_routine(void *connfdp)
 {
-    // 각 스레드별 connfd는 입력으로 가져온 fdP = connfdp가 가리키던 할당된 위치의 fd값
-    int connfd = *((int *)fdP);
+    // 각 스레드별 connfd는 입력으로 가져온 connfdp가 가리키던 할당된 위치의 fd값
+    int connfd = *((int *)connfdp);
     // 스레드 종료시 자원을 반납하고
     Pthread_detach(pthread_self());
     // connfdp도 이미 connfd를 얻어 역할을 다했으니 반납
-    Free(fdP);
+    Free(connfdp);
     // 이후 sequential과 같은 과정 진행
     doit(connfd);
     Close(connfd);
@@ -70,25 +70,27 @@ typedef struct
     int order; // LRU order
     int alloc, read;
     // write, read 과정에서 스레드간의 충돌으로부터 보호할 세마포어 각 1개씩
-    sem_t write_mutex, read_mutex;
+    sem_t writesemap, readsemap;
 } cache_block;
 
 typedef struct
 {
     cache_block cacheOBJ[MAX_OBJECT_NUM];
+    int cache_num;
 } Cache;
 
 // cache 스트럭쳐의 초기값을 설정
 Cache cache;
 void cache_init()
 {
+    cache.cache_num = 0;
     int index = 0;
     for (; index < MAX_OBJECT_NUM; index = index + 1)
     {
         cache.cacheOBJ[index].order = 0;
         cache.cacheOBJ[index].alloc = 0;
-        Sem_init(&cache.cacheOBJ[index].write_mutex, 0, 1);
-        Sem_init(&cache.cacheOBJ[index].read_mutex, 0, 1);
+        Sem_init(&cache.cacheOBJ[index].writesemap, 0, 1);
+        Sem_init(&cache.cacheOBJ[index].readsemap, 0, 1);
         cache.cacheOBJ[index].read = 0;
     }
 }
@@ -96,25 +98,25 @@ void cache_init()
 // 캐시를 읽기 전 세마포어 연산으로 타 스레드로부터 보호
 void readstart(int index)
 {
-    P(&cache.cacheOBJ[index].read_mutex);
+    P(&cache.cacheOBJ[index].readsemap);
     cache.cacheOBJ[index].read = cache.cacheOBJ[index].read + 1;
     // +1한 read가 1이라면 이 스레드에서 readstart 이후 write할 가능성이 열려있다
     // 타 스레드의 write로부터도 보호
     if (cache.cacheOBJ[index].read == 1)
-        P(&cache.cacheOBJ[index].write_mutex);
-    V(&cache.cacheOBJ[index].read_mutex);
+        P(&cache.cacheOBJ[index].writesemap);
+    V(&cache.cacheOBJ[index].readsemap);
 }
 
 // readstart의 역연산으로 돌려놓음
 void readend(int index)
 {
-    P(&cache.cacheOBJ[index].read_mutex);
+    P(&cache.cacheOBJ[index].readsemap);
     cache.cacheOBJ[index].read = cache.cacheOBJ[index].read - 1;
     // -1한 read가 0이라면 readstart때 write 보호를 받은 오브젝트인데, 이제 다음 readstart 전까지 write할 가능성이 없다
     // write로부터 보호 해제
     if (cache.cacheOBJ[index].read == 0)
-        V(&cache.cacheOBJ[index].write_mutex);
-    V(&cache.cacheOBJ[index].read_mutex);
+        V(&cache.cacheOBJ[index].writesemap);
+    V(&cache.cacheOBJ[index].readsemap);
 }
 
 // 가용한 캐시가 있는지 탐색하고 있다면 index를 리턴하는 함수
@@ -160,7 +162,7 @@ int cache_eviction()
             minindex = index;
             minorder = cache.cacheOBJ[index].order;
         }
-        readend(index);
+    readend(index);
     }
     // 빈 캐시가 발견되지 않고 for문이 종료되었다면 minindex를 return
     return minindex;
@@ -177,9 +179,9 @@ void cache_reorder(int target)
         // 나머지는 모두 order -1 (값을 수정하니 write 보호 필요)
         if (index - target)
         {
-            P(&cache.cacheOBJ[index].write_mutex);
+            P(&cache.cacheOBJ[index].writesemap);
             cache.cacheOBJ[index].order = cache.cacheOBJ[index].order - 1;
-            V(&cache.cacheOBJ[index].write_mutex);
+            V(&cache.cacheOBJ[index].writesemap);
         }
     }
 }
@@ -190,7 +192,7 @@ void cache_uri(char *uri, char *buf)
     // 차출
     int index = cache_eviction();
     // 쓰기 전 세마포어 보호
-    P(&cache.cacheOBJ[index].write_mutex);
+    P(&cache.cacheOBJ[index].writesemap);
     // buf, uri 카피
     strcpy(cache.cacheOBJ[index].cache_obj, buf);
     strcpy(cache.cacheOBJ[index].cache_uri, uri);
@@ -198,7 +200,7 @@ void cache_uri(char *uri, char *buf)
     // LRU order 재정렬
     cache_reorder(index);
     // 보호 해제
-    V(&cache.cacheOBJ[index].write_mutex);
+    V(&cache.cacheOBJ[index].writesemap);
 }
 
 /////////////////// cache imp. part end
